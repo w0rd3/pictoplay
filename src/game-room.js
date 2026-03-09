@@ -8,37 +8,76 @@ export class GameRoom {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.players = new Map();
+    this.initialized = false;
+  }
+
+  // Rebuild in-memory state from storage + live WebSockets
+  async ensureLoaded() {
+    if (this.initialized) return;
+    this.initialized = true;
+
+    const stored = await this.state.storage.get("gameState");
+    if (stored) {
+      this.gameState = stored;
+    } else {
+      this.gameState = {
+        players: {},       // { [playerId]: { name, score } }
+        phase: "lobby",
+        hostId: null,
+        currentDrawer: null,
+        currentWord: null,
+        drawOrder: [],
+        drawOrderIndex: 0,
+        roundNumber: 0,
+        guessedCorrectly: [],
+        strokes: [],
+        timeLeft: 0,
+        usedWords: [],
+        hints: [],
+        rating: "pg",
+      };
+    }
+
+    // Rebuild sockets map from hibernated WebSockets
     this.sockets = new Map();
-    this.phase = "lobby";
-    this.hostId = null;
-    this.currentDrawer = null;
-    this.currentWord = null;
-    this.drawOrder = [];
-    this.drawOrderIndex = 0;
-    this.roundNumber = 0;
-    this.guessedCorrectly = new Set();
-    this.strokes = [];
-    this.timer = null;
-    this.timeLeft = 0;
-    this.usedWords = new Set();
-    this.hints = [];
-    this.rating = "pg";
+    for (const ws of this.state.getWebSockets()) {
+      const attachment = ws.deserializeAttachment();
+      if (attachment && attachment.playerId) {
+        this.sockets.set(attachment.playerId, ws);
+      }
+    }
+
+    // Clean up players whose sockets are gone
+    for (const id of Object.keys(this.gameState.players)) {
+      if (!this.sockets.has(id)) {
+        delete this.gameState.players[id];
+      }
+    }
+
+    // Fix host if needed
+    if (!this.gameState.hostId || !this.sockets.has(this.gameState.hostId)) {
+      this.gameState.hostId = this.sockets.keys().next().value || null;
+    }
+  }
+
+  async saveState() {
+    await this.state.storage.put("gameState", this.gameState);
   }
 
   async fetch(request) {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
 
-    this.state.acceptWebSocket(server);
-
     const playerId = crypto.randomUUID().slice(0, 8);
+    this.state.acceptWebSocket(server);
     server.serializeAttachment({ playerId });
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
   async webSocketMessage(ws, message) {
+    await this.ensureLoaded();
+
     let data;
     try {
       data = JSON.parse(message);
@@ -50,10 +89,10 @@ export class GameRoom {
 
     switch (data.type) {
       case "join":
-        this.handleJoin(ws, playerId, data);
+        await this.handleJoin(ws, playerId, data);
         break;
       case "start":
-        this.handleStart(playerId, data);
+        await this.handleStart(playerId, data);
         break;
       case "draw":
         this.handleDraw(playerId, data);
@@ -62,142 +101,141 @@ export class GameRoom {
         this.handleClear(playerId);
         break;
       case "guess":
-        this.handleGuess(playerId, data);
+        await this.handleGuess(playerId, data);
         break;
     }
   }
 
   async webSocketClose(ws) {
+    await this.ensureLoaded();
     const { playerId } = ws.deserializeAttachment();
-    this.handleDisconnect(playerId);
+    await this.handleDisconnect(playerId);
   }
 
   async webSocketError(ws) {
+    await this.ensureLoaded();
     const { playerId } = ws.deserializeAttachment();
-    this.handleDisconnect(playerId);
+    await this.handleDisconnect(playerId);
   }
 
-  handleJoin(ws, playerId, data) {
+  async handleJoin(ws, playerId, data) {
+    const gs = this.gameState;
     const name = (data.name || "Player").slice(0, 16).trim();
 
-    this.players.set(playerId, { name, score: 0 });
+    gs.players[playerId] = { name, score: 0 };
     this.sockets.set(playerId, ws);
 
-    if (!this.hostId || !this.sockets.has(this.hostId)) {
-      this.hostId = playerId;
+    if (!gs.hostId || !this.sockets.has(gs.hostId)) {
+      gs.hostId = playerId;
     }
 
-    this.send(ws, { type: "joined", playerId, hostId: this.hostId, rating: this.rating });
+    this.send(ws, { type: "joined", playerId, hostId: gs.hostId, rating: gs.rating });
 
     // Send current game state to new player
-    if (this.phase !== "lobby") {
+    if (gs.phase !== "lobby") {
       this.send(ws, {
         type: "phase",
-        phase: this.phase,
-        drawer: this.currentDrawer,
-        drawerName: this.players.get(this.currentDrawer)?.name,
-        wordLength: this.currentWord?.length,
-        timeLeft: this.timeLeft,
-        round: this.roundNumber,
+        phase: gs.phase,
+        drawer: gs.currentDrawer,
+        drawerName: gs.players[gs.currentDrawer]?.name,
+        wordLength: gs.currentWord?.length,
+        timeLeft: gs.timeLeft,
+        round: gs.roundNumber,
         maxRounds: MAX_ROUNDS,
-        hint: this.hints.join(""),
+        hint: gs.hints.join(""),
       });
-      // Send existing strokes
-      if (this.strokes.length > 0) {
-        this.send(ws, { type: "strokes", strokes: this.strokes });
+      if (gs.strokes.length > 0) {
+        this.send(ws, { type: "strokes", strokes: gs.strokes });
       }
-      // If this player is the drawer, send the word
-      if (playerId === this.currentDrawer) {
-        this.send(ws, { type: "word", word: this.currentWord });
+      if (playerId === gs.currentDrawer) {
+        this.send(ws, { type: "word", word: gs.currentWord });
       }
     }
 
     this.broadcastPlayers();
+    await this.saveState();
   }
 
-  handleStart(playerId, data) {
-    if (playerId !== this.hostId) return;
-    if (this.phase !== "lobby") return;
-    if (this.players.size < 2) {
+  async handleStart(playerId, data) {
+    const gs = this.gameState;
+    if (playerId !== gs.hostId) return;
+    if (gs.phase !== "lobby") return;
+
+    const playerCount = Object.keys(gs.players).length;
+    if (playerCount < 2) {
       const ws = this.sockets.get(playerId);
       if (ws) this.send(ws, { type: "error", message: "Need at least 2 players" });
       return;
     }
 
-    // Set rating from host selection
     const rating = (data.rating || "pg").toLowerCase();
     if (PROMPTS[rating]) {
-      this.rating = rating;
+      gs.rating = rating;
     }
 
-    this.drawOrder = [...this.players.keys()];
-    this.shuffleArray(this.drawOrder);
-    this.drawOrderIndex = 0;
-    this.roundNumber = 1;
-    this.usedWords.clear();
+    gs.drawOrder = Object.keys(gs.players);
+    this.shuffleArray(gs.drawOrder);
+    gs.drawOrderIndex = 0;
+    gs.roundNumber = 1;
+    gs.usedWords = [];
 
-    // Broadcast rating to all players
-    this.broadcast({ type: "rating", rating: this.rating });
+    this.broadcast({ type: "rating", rating: gs.rating });
 
-    this.startTurn();
+    await this.startTurn();
   }
 
-  startTurn() {
-    // Pick drawer
-    const activePlayers = this.drawOrder.filter((id) => this.sockets.has(id));
+  async startTurn() {
+    const gs = this.gameState;
+
+    const activePlayers = gs.drawOrder.filter((id) => this.sockets.has(id));
     if (activePlayers.length < 2) {
-      this.endGame();
+      await this.endGame();
       return;
     }
 
-    this.currentDrawer = activePlayers[this.drawOrderIndex % activePlayers.length];
-    this.drawOrderIndex++;
+    gs.currentDrawer = activePlayers[gs.drawOrderIndex % activePlayers.length];
+    gs.drawOrderIndex++;
 
-    // Check if we've gone through all players (new round)
-    if (this.drawOrderIndex > 0 && this.drawOrderIndex % activePlayers.length === 0) {
-      this.roundNumber++;
-      if (this.roundNumber > MAX_ROUNDS) {
-        this.endGame();
+    if (gs.drawOrderIndex > 0 && gs.drawOrderIndex % activePlayers.length === 0) {
+      gs.roundNumber++;
+      if (gs.roundNumber > MAX_ROUNDS) {
+        await this.endGame();
         return;
       }
     }
 
-    // Pick prompt from rated pool
-    const pool = PROMPTS[this.rating] || PROMPTS.pg;
-    const available = pool.filter((w) => !this.usedWords.has(w));
-    if (available.length === 0) this.usedWords.clear();
+    const pool = PROMPTS[gs.rating] || PROMPTS.pg;
+    const usedSet = new Set(gs.usedWords);
+    const available = pool.filter((w) => !usedSet.has(w));
+    if (available.length === 0) gs.usedWords = [];
     const wordList = available.length > 0 ? available : pool;
-    this.currentWord = wordList[Math.floor(Math.random() * wordList.length)];
-    this.usedWords.add(this.currentWord);
+    gs.currentWord = wordList[Math.floor(Math.random() * wordList.length)];
+    gs.usedWords.push(gs.currentWord);
 
-    this.guessedCorrectly.clear();
-    this.strokes = [];
-    this.phase = "drawing";
-    this.timeLeft = ROUND_TIME;
+    gs.guessedCorrectly = [];
+    gs.strokes = [];
+    gs.phase = "drawing";
+    gs.timeLeft = ROUND_TIME;
+    gs.hints = gs.currentWord.split("").map((c) => (c === " " ? " " : "_"));
 
-    // Build initial hint (all underscores, preserve spaces)
-    this.hints = this.currentWord.split("").map((c) => (c === " " ? " " : "_"));
-
-    // Broadcast phase first, then send word to drawer
     this.broadcast({
       type: "phase",
       phase: "drawing",
-      drawer: this.currentDrawer,
-      drawerName: this.players.get(this.currentDrawer)?.name,
-      wordLength: this.currentWord.length,
-      timeLeft: this.timeLeft,
-      round: this.roundNumber,
+      drawer: gs.currentDrawer,
+      drawerName: gs.players[gs.currentDrawer]?.name,
+      wordLength: gs.currentWord.length,
+      timeLeft: gs.timeLeft,
+      round: gs.roundNumber,
       maxRounds: MAX_ROUNDS,
-      hint: this.hints.join(""),
+      hint: gs.hints.join(""),
     });
 
-    const drawerWs = this.sockets.get(this.currentDrawer);
-    if (drawerWs) this.send(drawerWs, { type: "word", word: this.currentWord });
+    const drawerWs = this.sockets.get(gs.currentDrawer);
+    if (drawerWs) this.send(drawerWs, { type: "word", word: gs.currentWord });
 
     this.broadcastPlayers();
-
-    // Start timer using alarm
-    this.scheduleAlarm();
+    await this.saveState();
+    await this.scheduleAlarm();
   }
 
   async scheduleAlarm() {
@@ -205,93 +243,100 @@ export class GameRoom {
   }
 
   async alarm() {
-    if (this.phase === "between") {
-      this.startTurn();
+    await this.ensureLoaded();
+    const gs = this.gameState;
+
+    if (gs.phase === "between") {
+      await this.startTurn();
       return;
     }
 
-    if (this.phase !== "drawing") return;
+    if (gs.phase !== "drawing") return;
 
-    this.timeLeft--;
+    gs.timeLeft--;
 
-    // Reveal hint letters periodically
-    if (this.timeLeft > 0 && this.timeLeft % HINT_INTERVAL === 0) {
+    if (gs.timeLeft > 0 && gs.timeLeft % HINT_INTERVAL === 0) {
       this.revealHintLetter();
     }
 
-    this.broadcast({ type: "tick", timeLeft: this.timeLeft, hint: this.hints.join("") });
+    this.broadcast({ type: "tick", timeLeft: gs.timeLeft, hint: gs.hints.join("") });
 
-    if (this.timeLeft <= 0) {
-      this.endTurn();
+    if (gs.timeLeft <= 0) {
+      await this.endTurn();
     } else {
+      await this.saveState();
       await this.scheduleAlarm();
     }
   }
 
   revealHintLetter() {
+    const gs = this.gameState;
     const hidden = [];
-    for (let i = 0; i < this.hints.length; i++) {
-      if (this.hints[i] === "_") hidden.push(i);
+    for (let i = 0; i < gs.hints.length; i++) {
+      if (gs.hints[i] === "_") hidden.push(i);
     }
     if (hidden.length <= 1) return;
     const idx = hidden[Math.floor(Math.random() * hidden.length)];
-    this.hints[idx] = this.currentWord[idx];
+    gs.hints[idx] = gs.currentWord[idx];
   }
 
   handleDraw(playerId, data) {
-    if (this.phase !== "drawing" || playerId !== this.currentDrawer) return;
+    const gs = this.gameState;
+    if (gs.phase !== "drawing" || playerId !== gs.currentDrawer) return;
 
     const stroke = {
       points: data.points,
       color: data.color,
       width: data.width,
     };
-    this.strokes.push(stroke);
+    gs.strokes.push(stroke);
 
     this.broadcast({ type: "draw", stroke }, playerId);
+    // Don't await saveState for draw — too frequent, strokes are transient
   }
 
   handleClear(playerId) {
-    if (this.phase !== "drawing" || playerId !== this.currentDrawer) return;
-    this.strokes = [];
+    const gs = this.gameState;
+    if (gs.phase !== "drawing" || playerId !== gs.currentDrawer) return;
+    gs.strokes = [];
     this.broadcast({ type: "clear" }, playerId);
   }
 
-  handleGuess(playerId, data) {
-    if (this.phase !== "drawing") return;
-    if (playerId === this.currentDrawer) return;
-    if (this.guessedCorrectly.has(playerId)) return;
+  async handleGuess(playerId, data) {
+    const gs = this.gameState;
+    if (gs.phase !== "drawing") return;
+    if (playerId === gs.currentDrawer) return;
+    if (gs.guessedCorrectly.includes(playerId)) return;
 
     const guess = (data.text || "").trim().toLowerCase();
     if (!guess) return;
 
-    const player = this.players.get(playerId);
+    const player = gs.players[playerId];
     if (!player) return;
 
-    if (guess === this.currentWord.toLowerCase()) {
-      this.guessedCorrectly.add(playerId);
+    if (guess === gs.currentWord.toLowerCase()) {
+      gs.guessedCorrectly.push(playerId);
 
-      // Score: more points for guessing early
-      const timeBonus = Math.ceil((this.timeLeft / ROUND_TIME) * 400);
+      const timeBonus = Math.ceil((gs.timeLeft / ROUND_TIME) * 400);
       player.score += 100 + timeBonus;
 
-      // Drawer also gets points
-      const drawer = this.players.get(this.currentDrawer);
+      const drawer = gs.players[gs.currentDrawer];
       if (drawer) drawer.score += 50;
 
       this.broadcast({ type: "correct", playerId, playerName: player.name });
       this.broadcastPlayers();
 
-      // Check if all non-drawer players have guessed
-      const nonDrawers = [...this.players.keys()].filter(
-        (id) => id !== this.currentDrawer && this.sockets.has(id)
+      const nonDrawers = Object.keys(gs.players).filter(
+        (id) => id !== gs.currentDrawer && this.sockets.has(id)
       );
-      if (nonDrawers.every((id) => this.guessedCorrectly.has(id))) {
-        this.endTurn();
+      if (nonDrawers.every((id) => gs.guessedCorrectly.includes(id))) {
+        await this.endTurn();
+        return;
       }
+
+      await this.saveState();
     } else {
-      // Check for close guess (off by 1-2 chars)
-      const isClose = this.isCloseGuess(guess, this.currentWord.toLowerCase());
+      const isClose = this.isCloseGuess(guess, gs.currentWord.toLowerCase());
       this.broadcast({
         type: "chat",
         playerId,
@@ -313,57 +358,55 @@ export class GameRoom {
     return diff <= 2 && diff > 0;
   }
 
-  endTurn() {
-    this.phase = "between";
-    this.broadcast({
-      type: "reveal",
-      word: this.currentWord,
-    });
+  async endTurn() {
+    const gs = this.gameState;
+    gs.phase = "between";
+    this.broadcast({ type: "reveal", word: gs.currentWord });
     this.broadcastPlayers();
 
-    // Schedule next turn after 5 seconds
-    this.state.storage.setAlarm(Date.now() + 5000);
-    this.phase = "between";
+    await this.saveState();
+    await this.state.storage.setAlarm(Date.now() + 5000);
   }
 
-  // alarm() handles both tick and between-turn transition
-  // We differentiate by checking this.phase
+  async endGame() {
+    const gs = this.gameState;
+    gs.phase = "lobby";
 
-  endGame() {
-    this.phase = "lobby";
-    const scores = [...this.players.entries()]
+    const scores = Object.entries(gs.players)
       .map(([id, p]) => ({ id, name: p.name, score: p.score }))
       .sort((a, b) => b.score - a.score);
 
     this.broadcast({ type: "gameover", scores });
 
-    // Reset scores
-    for (const [, p] of this.players) {
-      p.score = 0;
+    for (const id of Object.keys(gs.players)) {
+      gs.players[id].score = 0;
     }
     this.broadcastPlayers();
+    await this.saveState();
   }
 
-  handleDisconnect(playerId) {
+  async handleDisconnect(playerId) {
+    const gs = this.gameState;
     this.sockets.delete(playerId);
-    this.players.delete(playerId);
+    delete gs.players[playerId];
 
-    // Reassign host
-    if (playerId === this.hostId) {
-      this.hostId = this.sockets.keys().next().value || null;
+    if (playerId === gs.hostId) {
+      gs.hostId = this.sockets.keys().next().value || null;
     }
 
     this.broadcastPlayers();
 
-    // If drawer disconnected during drawing, end turn
-    if (this.phase === "drawing" && playerId === this.currentDrawer) {
-      this.endTurn();
+    if (gs.phase === "drawing" && playerId === gs.currentDrawer) {
+      await this.endTurn();
+      return;
     }
 
-    // If fewer than 2 players during game, end
-    if (this.phase !== "lobby" && this.sockets.size < 2) {
-      this.endGame();
+    if (gs.phase !== "lobby" && this.sockets.size < 2) {
+      await this.endGame();
+      return;
     }
+
+    await this.saveState();
   }
 
   send(ws, data) {
@@ -383,15 +426,16 @@ export class GameRoom {
   }
 
   broadcastPlayers() {
-    const players = [...this.players.entries()].map(([id, p]) => ({
+    const gs = this.gameState;
+    const players = Object.entries(gs.players).map(([id, p]) => ({
       id,
       name: p.name,
       score: p.score,
-      isHost: id === this.hostId,
-      isDrawing: id === this.currentDrawer && this.phase === "drawing",
+      isHost: id === gs.hostId,
+      isDrawing: id === gs.currentDrawer && gs.phase === "drawing",
       connected: this.sockets.has(id),
     }));
-    this.broadcast({ type: "players", players, hostId: this.hostId });
+    this.broadcast({ type: "players", players, hostId: gs.hostId });
   }
 
   shuffleArray(arr) {
