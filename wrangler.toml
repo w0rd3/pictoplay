@@ -1,0 +1,14 @@
+name = "pictoplay"
+main = "src/worker.js"
+compatibility_date = "2025-01-01"
+
+[assets]
+directory = "public"
+
+[[durable_objects.bindings]]
+name = "GAME_ROOM"
+class_name = "GameRoom"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["GameRoom"]

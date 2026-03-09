@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0">
+  <title>PictoPlay</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- Lobby Screen -->
+  <div id="screen-lobby" class="screen active">
+    <div class="lobby-container">
+      <h1 class="logo">PictoPlay</h1>
+      <p class="subtitle">Draw It Dirty, Guess It Clean</p>
+
+      <div class="form-group">
+        <label for="player-name">Your Name</label>
+        <input type="text" id="player-name" maxlength="16" placeholder="Enter your name" autocomplete="off">
+      </div>
+
+      <div class="form-group">
+        <label>Rating</label>
+        <div class="rating-picker">
+          <button class="rating-btn active" data-rating="pg">PG</button>
+          <button class="rating-btn" data-rating="pg13">PG-13</button>
+          <button class="rating-btn" data-rating="r">R</button>
+        </div>
+        <p class="rating-desc" id="rating-desc">Family-friendly fun — absurd and silly prompts</p>
+      </div>
+
+      <div class="form-group">
+        <label for="game-key">Game Key</label>
+        <input type="text" id="game-key" maxlength="6" placeholder="Enter key to join" autocomplete="off" style="text-transform:uppercase">
+      </div>
+
+      <button id="btn-create" class="btn btn-primary">Create Game</button>
+      <button id="btn-join" class="btn btn-secondary">Join Game</button>
+
+      <p id="lobby-error" class="error-text"></p>
+    </div>
+  </div>
+
+  <!-- Waiting Room -->
+  <div id="screen-waiting" class="screen">
+    <div class="waiting-container">
+      <div class="game-key-display">
+        <span class="label">Game Key</span>
+        <span id="display-key" class="key-value"></span>
+        <button id="btn-copy-key" class="btn-small">Copy</button>
+      </div>
+      <div id="waiting-rating-picker" class="form-group" style="display:none">
+        <label>Rating</label>
+        <div class="rating-picker">
+          <button class="waiting-rating-btn rating-btn active" data-rating="pg">PG</button>
+          <button class="waiting-rating-btn rating-btn" data-rating="pg13">PG-13</button>
+          <button class="waiting-rating-btn rating-btn" data-rating="r">R</button>
+        </div>
+      </div>
+      <div class="rating-badge" id="rating-badge" style="display:none">PG</div>
+
+      <h2>Players</h2>
+      <ul id="player-list" class="player-list"></ul>
+
+      <button id="btn-start" class="btn btn-primary" style="display:none">Start Game</button>
+      <p id="waiting-msg" class="hint-text">Waiting for host to start...</p>
+    </div>
+  </div>
+
+  <!-- Game Screen -->
+  <div id="screen-game" class="screen">
+    <div class="game-header">
+      <div class="round-info">
+        <span id="round-display">Round 1/3</span>
+      </div>
+      <div class="word-display" id="word-display"></div>
+      <div class="timer" id="timer-display">80</div>
+    </div>
+
+    <div class="canvas-wrapper">
+      <canvas id="draw-canvas"></canvas>
+    </div>
+
+    <!-- Drawing tools (only for drawer) -->
+    <div id="draw-tools" class="draw-tools hidden">
+      <div class="color-picker">
+        <button class="color-btn active" data-color="#000000" style="background:#000000"></button>
+        <button class="color-btn" data-color="#ef4444" style="background:#ef4444"></button>
+        <button class="color-btn" data-color="#f97316" style="background:#f97316"></button>
+        <button class="color-btn" data-color="#eab308" style="background:#eab308"></button>
+        <button class="color-btn" data-color="#22c55e" style="background:#22c55e"></button>
+        <button class="color-btn" data-color="#3b82f6" style="background:#3b82f6"></button>
+        <button class="color-btn" data-color="#8b5cf6" style="background:#8b5cf6"></button>
+        <button class="color-btn" data-color="#a855f7" style="background:#a855f7"></button>
+        <button class="color-btn" data-color="#ffffff" style="background:#ffffff;border:1px solid #ccc"></button>
+        <button class="color-btn" data-color="#6b7280" style="background:#6b7280"></button>
+        <button class="color-btn" data-color="#92400e" style="background:#92400e"></button>
+      </div>
+      <div class="tool-row">
+        <input type="range" id="brush-size" min="2" max="24" value="4" class="brush-slider">
+        <button id="btn-clear" class="btn-small">Clear</button>
+      </div>
+    </div>
+
+    <!-- Guess area (only for guessers) -->
+    <div id="guess-area" class="guess-area hidden">
+      <div id="chat-log" class="chat-log"></div>
+      <div class="guess-input-row">
+        <input type="text" id="guess-input" placeholder="Type your guess..." autocomplete="off">
+        <button id="btn-guess" class="btn btn-primary btn-send">Send</button>
+      </div>
+    </div>
+
+    <!-- Scoreboard overlay -->
+    <div id="scores-panel" class="scores-panel">
+      <ul id="game-scores"></ul>
+    </div>
+  </div>
+
+  <!-- Game Over Overlay -->
+  <div id="overlay-gameover" class="overlay hidden">
+    <div class="overlay-content">
+      <h2>Game Over!</h2>
+      <ol id="final-scores" class="final-scores"></ol>
+      <button id="btn-play-again" class="btn btn-primary">Play Again</button>
+    </div>
+  </div>
+
+  <!-- Reveal Overlay -->
+  <div id="overlay-reveal" class="overlay hidden">
+    <div class="overlay-content reveal-content">
+      <p>The prompt was</p>
+      <h2 id="reveal-word" class="reveal-word"></h2>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
