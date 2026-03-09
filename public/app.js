@@ -175,19 +175,23 @@
     if (data.phase === "drawing") {
       clearCanvas();
 
+      // Both drawer and guessers see the chat log
+      $("#guess-area").classList.remove("hidden");
+
       if (isDrawer) {
-        // Show draw tools, hide guess area
         $("#draw-tools").classList.remove("hidden");
-        $("#guess-area").classList.add("hidden");
-        $("#word-display").textContent = ""; // word comes via separate message
+        $("#word-display").textContent = "";
         $("#word-display").classList.add("drawer-prompt");
+        // Drawer sees chat but can't type guesses
+        $("#guess-input").disabled = true;
+        $("#guess-input").placeholder = "";
+        $(".guess-input-row").classList.add("hidden");
         enableDrawing();
       } else {
-        // Show guess area, hide draw tools
         $("#draw-tools").classList.add("hidden");
-        $("#guess-area").classList.remove("hidden");
         $("#guess-input").disabled = false;
         $("#guess-input").placeholder = "Type your guess...";
+        $(".guess-input-row").classList.remove("hidden");
         $("#word-display").classList.remove("drawer-prompt");
         updateHint(data.hint);
         disableDrawing();
